@@ -1,0 +1,636 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>推箱子 3D</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0d0f; }
+    body {
+      font-family: "Cascadia Mono", "Consolas", "Courier New", monospace;
+      color: #e6f1ff;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    #stage { position: fixed; inset: 0; }
+    #stage canvas { display: block; }
+
+    .hud {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      display: flex;
+      gap: 16px;
+      font-size: 12px;
+      letter-spacing: 1px;
+      color: rgba(230, 241, 255, 0.55);
+      pointer-events: none;
+      user-select: none;
+    }
+    .hud b { color: #00eaff; font-weight: 500; }
+    .hud .lv { color: rgba(230, 241, 255, 0.85); }
+
+    .actions {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      display: flex;
+      gap: 8px;
+      z-index: 10;
+    }
+    .actions button {
+      background: rgba(0, 234, 255, 0.08);
+      border: 1px solid rgba(0, 234, 255, 0.25);
+      color: rgba(230, 241, 255, 0.8);
+      font-family: inherit;
+      font-size: 11px;
+      letter-spacing: 1px;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .actions button:hover { background: rgba(0, 234, 255, 0.18); }
+    .actions button:active { transform: translateY(1px); }
+
+    .tip {
+      position: fixed;
+      bottom: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 11px;
+      letter-spacing: 1px;
+      color: rgba(230, 241, 255, 0.3);
+      pointer-events: none;
+      user-select: none;
+      white-space: nowrap;
+    }
+
+    #win {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(5, 8, 10, 0.72);
+    }
+    #win.show { display: flex; }
+    .win-card {
+      padding: 24px 36px;
+      border: 1px solid rgba(0, 234, 255, 0.28);
+      border-radius: 10px;
+      background: #101519;
+      text-align: center;
+    }
+    .win-card h2 {
+      margin: 0 0 6px;
+      font-size: 18px;
+      font-weight: 500;
+      letter-spacing: 2px;
+      color: #e6f1ff;
+    }
+    .win-card p {
+      margin: 0 0 16px;
+      font-size: 12px;
+      letter-spacing: 1px;
+      color: rgba(230, 241, 255, 0.5);
+    }
+    .win-card .keys {
+      font-size: 11px;
+      letter-spacing: 1px;
+      color: rgba(0, 234, 255, 0.7);
+    }
+  </style>
+</head>
+<body>
+  <div id="stage"></div>
+
+  <div class="hud">
+    <span class="lv">关卡 <b id="lv">01/03</b></span>
+    <span>步数 <b id="mv">0</b></span>
+    <span>推动 <b id="ps">0</b></span>
+    <span>最佳 <b id="best">—</b></span>
+  </div>
+
+  <div class="actions">
+    <button id="btnSave" title="写入本地存档">存档</button>
+    <button id="btnLoad" title="读取上次存档">读档</button>
+    <button id="btnReset" title="重开本关 (R)">重开</button>
+    <button id="btnNext" title="下一关 (N)">下一关</button>
+  </div>
+
+  <div class="tip">WASD / 方向键 移动 · R 重开 · N 下一关 · 进度自动存档</div>
+
+  <div id="win">
+    <div class="win-card">
+      <h2>关卡完成</h2>
+      <p id="win-sub"></p>
+      <div class="keys">R 重开 · N 下一关</div>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three'
+    import { LEVELS } from './data.js'
+
+    /* ======================= 常量 ======================= */
+    const TILE = 1
+    const COLOR = {
+      bg: 0x0b0d0f,
+      floorA: 0x151a1f,
+      floorB: 0x1a2026,
+      wall: 0x252d34,
+      box: 0xb98a3c,
+      boxDone: 0x2ec4b6,
+      goal: 0x2ec4b6,
+      player: 0xe6eef5,
+      accent: 0x00eaff,
+    }
+
+    /* ======================= 本地存档 ======================= */
+    const SAVE_KEY = 'sokoban.save.v1'      // 中途存档：当前关 + 人/箱位置 + 步数
+    const PROGRESS_KEY = 'sokoban.progress.v1' // 通关记录：uuid -> { moves, pushes }
+
+    function readJSON (key, fallback) {
+      try {
+        const raw = localStorage.getItem(key)
+        return raw == null ? fallback : JSON.parse(raw)
+      } catch (e) {
+        console.warn('[sokoban] 读取存储失败', key, e)
+        return fallback
+      }
+    }
+    function writeJSON (key, val) {
+      try { localStorage.setItem(key, JSON.stringify(val)) }
+      catch (e) { console.warn('[sokoban] 写入存储失败', key, e) }
+    }
+
+    // 通关记录：{ solved: { [uuid]: { moves, pushes } } }
+    let progress = readJSON(PROGRESS_KEY, { solved: {} })
+
+    // 按 uuid 定位关卡；顺序被打乱/删除后旧存档仍能落到正确关卡，找不到再回退到存档里的序号
+    function resolveLevelIndex (uuid, fallback) {
+      const i = LEVELS.findIndex(l => l.uuid === uuid)
+      return i >= 0 ? i : fallback
+    }
+
+    // 存档合法性校验：关卡存在、箱子数量一致、坐标是有限数、箱子不重叠
+    function isValidSnapshot (snap) {
+      if (!snap || typeof snap.level !== 'number') return false
+      const idx = resolveLevelIndex(snap.uuid, snap.level)
+      if (idx < 0 || idx >= LEVELS.length) return false
+      const parsed = parseLevel(LEVELS[idx].rows)
+      if (!snap.player || !Number.isFinite(snap.player.x) || !Number.isFinite(snap.player.z)) return false
+      if (parsed.wallSet.has(snap.player.x + ',' + snap.player.z)) return false
+      if (!Array.isArray(snap.boxes) || snap.boxes.length !== parsed.boxes.length) return false
+      const keys = []
+      for (const b of snap.boxes) {
+        if (!Number.isFinite(b.x) || !Number.isFinite(b.z)) return false
+        if (parsed.wallSet.has(b.x + ',' + b.z)) return false
+        keys.push(b.x + ',' + b.z)
+      }
+      return new Set(keys).size === keys.length
+    }
+
+    function saveGame () {
+      if (!state || state.solved) return
+      const snap = {
+        level: current,
+        uuid: LEVELS[current].uuid,
+        player: { ...state.player },
+        boxes: state.boxObjs.map(b => ({ x: b.x, z: b.z })),
+        moves: state.moves,
+        pushes: state.pushes,
+        savedAt: Date.now(),
+      }
+      writeJSON(SAVE_KEY, snap)
+      console.debug('[sokoban] 已自动存档 关卡', current + 1, snap.moves, '步')
+    }
+
+    function readSave () { return readJSON(SAVE_KEY, null) }
+
+    function clearSave () {
+      try { localStorage.removeItem(SAVE_KEY) } catch (e) { console.warn('[sokoban] 清档失败', e) }
+    }
+
+    // 把存档快照套到刚解析好的关卡上（覆盖人/箱位置与步数）
+    function applySnapshot (snap) {
+      state.player = { x: snap.player.x, z: snap.player.z }
+      state.playerMesh.position.set(snap.player.x, 0.39, snap.player.z)
+      if (Array.isArray(snap.boxes) && snap.boxes.length === state.boxObjs.length) {
+        state.boxObjs.forEach((b, i) => {
+          b.x = snap.boxes[i].x
+          b.z = snap.boxes[i].z
+          b.mesh.position.set(b.x, 0.39, b.z)
+          refreshBox(b)
+        })
+      }
+      state.moves = snap.moves || 0
+      state.pushes = snap.pushes || 0
+    }
+
+    /* ======================= 渲染骨架 ======================= */
+    let renderer, scene, camera, levelGroup
+    let state = null
+    let current = 0
+    let lastMove = 0
+
+    function init () {
+      const host = document.getElementById('stage')
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+      renderer.setSize(window.innerWidth, window.innerHeight)
+      renderer.outputColorSpace = THREE.SRGBColorSpace
+      renderer.shadowMap.enabled = true
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap
+      host.appendChild(renderer.domElement)
+
+      scene = new THREE.Scene()
+      scene.background = new THREE.Color(COLOR.bg)
+
+      camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 300)
+
+      const hemi = new THREE.HemisphereLight(0x9fb6c6, 0x0b0d0f, 1.0)
+      scene.add(hemi)
+
+      const key = new THREE.DirectionalLight(0xffffff, 1.5)
+      key.position.set(6, 12, 8)
+      key.castShadow = true
+      key.shadow.mapSize.set(1024, 1024)
+      key.shadow.camera.near = 1
+      key.shadow.camera.far = 60
+      key.shadow.camera.left = -14
+      key.shadow.camera.right = 14
+      key.shadow.camera.top = 14
+      key.shadow.camera.bottom = -14
+      key.shadow.bias = -0.0006
+      scene.add(key)
+
+      const fill = new THREE.DirectionalLight(0x4a6a80, 0.35)
+      fill.position.set(-8, 6, -6)
+      scene.add(fill)
+
+      levelGroup = new THREE.Group()
+      scene.add(levelGroup)
+
+      window.addEventListener('resize', onResize)
+      window.addEventListener('keydown', onKey)
+
+      // 启动时优先读档恢复；存档损坏/关卡已删则丢弃并从第 1 关开始
+      const snap = readSave()
+      if (isValidSnapshot(snap)) {
+        const idx = resolveLevelIndex(snap.uuid, snap.level)
+        load(idx, snap)
+        console.debug('[sokoban] 读档恢复 关卡', idx + 1)
+      } else {
+        if (snap) clearSave()
+        load(0)
+      }
+      requestAnimationFrame(tick)
+    }
+
+    /* ======================= 关卡解析 / 构建 ======================= */
+    function parseLevel (rows) {
+      const d = rows.length
+      const w = Math.max(...rows.map(r => r.length))
+      const walls = []
+      const goals = []
+      const boxes = []
+      let player = { x: 0, z: 0 }
+
+      for (let z = 0; z < d; z++) {
+        const row = rows[z]
+        for (let x = 0; x < w; x++) {
+          const ch = row[x] || ' '
+          if (ch === '#') walls.push({ x, z })
+          if (ch === '.') goals.push({ x, z })
+          if (ch === '$') boxes.push({ x, z })
+          if (ch === '*') { goals.push({ x, z }); boxes.push({ x, z }) }
+          if (ch === '@') player = { x, z }
+          if (ch === '+') { goals.push({ x, z }); player = { x, z } }
+        }
+      }
+
+      return {
+        w, d, walls, goals, boxes, player,
+        wallSet: new Set(walls.map(c => c.x + ',' + c.z)),
+        goalSet: new Set(goals.map(c => c.x + ',' + c.z)),
+        moves: 0, pushes: 0, solved: false,
+        boxObjs: [], playerMesh: null,
+      }
+    }
+
+    const isWall = (x, z) => {
+      if (!state) return true
+      if (x < 0 || z < 0 || x >= state.w || z >= state.d) return true
+      return state.wallSet.has(x + ',' + z)
+    }
+    const isGoal = (x, z) => state.goalSet.has(x + ',' + z)
+
+    function clearLevel () {
+      levelGroup.traverse(obj => {
+        if (obj.isMesh || obj.isLineSegments) {
+          obj.geometry?.dispose()
+          const m = obj.material
+          if (Array.isArray(m)) m.forEach(x => x.dispose())
+          else m?.dispose()
+        }
+      })
+      levelGroup.clear()
+    }
+
+    function buildScene () {
+      const { w, d } = state
+      // 整张地图居中
+      levelGroup.position.set(-(w - 1) / 2, 0, -(d - 1) / 2)
+
+      const floorGeo = new THREE.BoxGeometry(TILE * 0.96, 0.08, TILE * 0.96)
+      const floorMatA = new THREE.MeshStandardMaterial({ color: COLOR.floorA, roughness: 0.85, metalness: 0.05 })
+      const floorMatB = new THREE.MeshStandardMaterial({ color: COLOR.floorB, roughness: 0.85, metalness: 0.05 })
+      const wallGeo = new THREE.BoxGeometry(TILE * 0.98, 0.9, TILE * 0.98)
+      const wallMat = new THREE.MeshStandardMaterial({ color: COLOR.wall, roughness: 0.7, metalness: 0.2 })
+
+      // 地板 + 墙体
+      for (let z = 0; z < d; z++) {
+        for (let x = 0; x < w; x++) {
+          if (state.wallSet.has(x + ',' + z)) {
+            const mesh = new THREE.Mesh(wallGeo, wallMat)
+            mesh.position.set(x, 0.45, z)
+            mesh.castShadow = true
+            mesh.receiveShadow = true
+            levelGroup.add(mesh)
+          } else {
+            const mesh = new THREE.Mesh(floorGeo, (x + z) % 2 === 0 ? floorMatA : floorMatB)
+            mesh.position.set(x, -0.04, z)
+            mesh.receiveShadow = true
+            levelGroup.add(mesh)
+          }
+        }
+      }
+
+      // 目标点：平铺的圆环 + 中心圆点
+      const goalMat = new THREE.MeshBasicMaterial({
+        color: COLOR.goal, transparent: true, opacity: 0.5, side: THREE.DoubleSide,
+      })
+      const goalMatCore = new THREE.MeshBasicMaterial({
+        color: COLOR.goal, transparent: true, opacity: 0.22, side: THREE.DoubleSide,
+      })
+      const ringGeo = new THREE.RingGeometry(0.2, 0.32, 28).rotateX(-Math.PI / 2)
+      const coreGeo = new THREE.CircleGeometry(0.1, 20).rotateX(-Math.PI / 2)
+      for (const g of state.goals) {
+        const ring = new THREE.Mesh(ringGeo, goalMat)
+        ring.position.set(g.x, 0.015, g.z)
+        levelGroup.add(ring)
+
+        const core = new THREE.Mesh(coreGeo, goalMatCore)
+        core.position.set(g.x, 0.012, g.z)
+        levelGroup.add(core)
+      }
+
+      // 箱子
+      const boxGeo = new THREE.BoxGeometry(0.78, 0.78, 0.78)
+      const boxEdgeGeo = new THREE.EdgesGeometry(boxGeo)
+      for (const b of state.boxes) {
+        const mat = new THREE.MeshStandardMaterial({
+          color: isGoal(b.x, b.z) ? COLOR.boxDone : COLOR.box,
+          roughness: 0.55, metalness: 0.15,
+        })
+        const mesh = new THREE.Mesh(boxGeo, mat)
+        mesh.position.set(b.x, 0.39, b.z)
+        mesh.castShadow = true
+        mesh.receiveShadow = true
+
+        const edges = new THREE.LineSegments(
+          boxEdgeGeo,
+          new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 })
+        )
+        mesh.add(edges)
+        levelGroup.add(mesh)
+
+        state.boxObjs.push({ mesh, x: b.x, z: b.z })
+      }
+
+      // 玩家
+      const bodyGeo = new THREE.CapsuleGeometry(0.22, 0.34, 6, 14)
+      const bodyMat = new THREE.MeshStandardMaterial({ color: COLOR.player, roughness: 0.45, metalness: 0.05 })
+      const playerMesh = new THREE.Mesh(bodyGeo, bodyMat)
+      playerMesh.position.set(state.player.x, 0.39, state.player.z)
+      playerMesh.castShadow = true
+
+      // 朝向标记
+      const nose = new THREE.Mesh(
+        new THREE.ConeGeometry(0.09, 0.2, 10),
+        new THREE.MeshStandardMaterial({ color: COLOR.accent, roughness: 0.4 })
+      )
+      nose.rotation.x = Math.PI / 2
+      nose.position.set(0, 0.06, 0.27)
+      playerMesh.add(nose)
+
+      levelGroup.add(playerMesh)
+      state.playerMesh = playerMesh
+
+      // 初始朝向：看最近的箱子
+      faceTo(0, 1)
+    }
+
+    function faceTo (dx, dz) {
+      if (!state || !state.playerMesh) return
+      state.playerMesh.rotation.y = Math.atan2(dx, dz)
+    }
+
+    /* ======================= 游戏逻辑 ======================= */
+    function move (dx, dz) {
+      if (!state || state.solved) return
+      const p = state.player
+      const nx = p.x + dx, nz = p.z + dz
+      if (isWall(nx, nz)) return
+
+      const box = state.boxObjs.find(b => b.x === nx && b.z === nz)
+      if (box) {
+        const bx = nx + dx, bz = nz + dz
+        if (isWall(bx, bz)) return
+        if (state.boxObjs.some(b => b.x === bx && b.z === bz)) return
+
+        box.x = bx
+        box.z = bz
+        state.pushes++
+        refreshBox(box)
+      }
+
+      state.player = { x: nx, z: nz }
+      state.moves++
+      faceTo(dx, dz)
+      updateHud()
+      checkWin()
+      if (!state.solved) saveGame()
+    }
+
+    function refreshBox (box) {
+      const done = isGoal(box.x, box.z)
+      box.mesh.material.color.set(done ? COLOR.boxDone : COLOR.box)
+    }
+
+    function checkWin () {
+      const allDone = state.boxObjs.every(b => isGoal(b.x, b.z))
+      if (!allDone) return
+      state.solved = true
+
+      // 记录本关最佳步数（只保留更少的一次）
+      const uuid = LEVELS[current].uuid
+      const best = progress.solved[uuid]
+      if (!best || state.moves < best.moves) {
+        progress.solved[uuid] = { moves: state.moves, pushes: state.pushes }
+        writeJSON(PROGRESS_KEY, progress)
+      }
+      // 通关后清掉中途存档，下次从下一关重新开始
+      clearSave()
+
+      const el = document.getElementById('win')
+      document.getElementById('win-sub').textContent =
+        `步数 ${state.moves} · 推动 ${state.pushes} · 关卡 ${current + 1}/${LEVELS.length}`
+      el.classList.add('show')
+    }
+
+    function hideWin () {
+      document.getElementById('win').classList.remove('show')
+    }
+
+    function updateHud () {
+      document.getElementById('lv').textContent =
+        String(current + 1).padStart(2, '0') + '/' + String(LEVELS.length).padStart(2, '0')
+      document.getElementById('mv').textContent = state ? state.moves : 0
+      document.getElementById('ps').textContent = state ? state.pushes : 0
+      const best = progress.solved[LEVELS[current].uuid]
+      document.getElementById('best').textContent = best ? best.moves : '—'
+    }
+
+    function load (index, snapshot) {
+      current = Math.max(0, Math.min(index, LEVELS.length - 1))
+      clearLevel()
+      state = parseLevel(LEVELS[current].rows)
+      buildScene()
+      if (snapshot) applySnapshot(snapshot)
+      hideWin()
+      updateHud()
+      fitCamera()
+      console.debug('[sokoban] load level', current, LEVELS[current].uuid, state.w + 'x' + state.d)
+    }
+
+    function next () {
+      if (current + 1 >= LEVELS.length) {
+        load(0)
+      } else {
+        load(current + 1)
+      }
+    }
+
+    /* ======================= 相机 ======================= */
+    function fitCamera () {
+      if (!state) return
+      const span = Math.max(state.w, state.d)
+      const aspect = window.innerWidth / window.innerHeight
+      let dist = span * 1.4 + 4
+      if (aspect < 1) dist *= Math.min(1.1 / aspect, 1.8)
+
+      const dir = new THREE.Vector3(0.42, 0.9, 0.55).normalize()
+      camera.position.copy(dir.multiplyScalar(dist))
+      camera.aspect = aspect
+      camera.lookAt(0, 0, 0)
+      camera.updateProjectionMatrix()
+    }
+
+    function onResize () {
+      renderer.setSize(window.innerWidth, window.innerHeight)
+      camera.aspect = window.innerWidth / window.innerHeight
+      camera.updateProjectionMatrix()
+      fitCamera()
+    }
+
+    /* ======================= 输入 ======================= */
+    const DIRS = {
+      arrowup: [0, -1], w: [0, -1],
+      arrowdown: [0, 1], s: [0, 1],
+      arrowleft: [-1, 0], a: [-1, 0],
+      arrowright: [1, 0], d: [1, 0],
+    }
+
+    function onKey (e) {
+      const key = e.key.toLowerCase()
+
+      if (key === 'r') {
+        e.preventDefault()
+        clearSave()
+        load(current)
+        return
+      }
+      if (key === 'n') {
+        e.preventDefault()
+        next()
+        return
+      }
+
+      const dir = DIRS[key]
+      if (!dir) return
+      e.preventDefault()
+
+      const now = performance.now()
+      if (now - lastMove < 120) return
+      lastMove = now
+      move(dir[0], dir[1])
+    }
+
+    /* ======================= 按钮 / 提示 ======================= */
+    const TIP_DEFAULT = 'WASD / 方向键 移动 · R 重开 · N 下一关 · 进度自动存档'
+    let tipTimer
+    function flashTip (msg) {
+      const el = document.querySelector('.tip')
+      el.textContent = msg
+      clearTimeout(tipTimer)
+      tipTimer = setTimeout(() => { el.textContent = TIP_DEFAULT }, 1500)
+    }
+
+    document.getElementById('btnSave').addEventListener('click', () => {
+      if (!state || state.solved) { flashTip('本关已通关，无需存档'); return }
+      saveGame()
+      flashTip('已写入本地存档')
+    })
+    document.getElementById('btnLoad').addEventListener('click', () => {
+      const snap = readSave()
+      if (!isValidSnapshot(snap)) { flashTip('没有可用存档'); return }
+      load(resolveLevelIndex(snap.uuid, snap.level), snap)
+      flashTip('已读取存档')
+    })
+    document.getElementById('btnReset').addEventListener('click', () => {
+      clearSave()
+      load(current)
+    })
+    document.getElementById('btnNext').addEventListener('click', next)
+
+    /* ======================= 渲染循环 ======================= */
+    function tick (t) {
+      requestAnimationFrame(tick)
+      if (!state) return
+
+      const ease = 0.2
+      for (const b of state.boxObjs) {
+        b.mesh.position.x += (b.x - b.mesh.position.x) * ease
+        b.mesh.position.z += (b.z - b.mesh.position.z) * ease
+      }
+
+      const mesh = state.playerMesh
+      if (mesh) {
+        mesh.position.x += (state.player.x - mesh.position.x) * 0.25
+        mesh.position.z += (state.player.z - mesh.position.z) * 0.25
+        const bob = Math.sin(t * 0.006) * 0.012
+        mesh.position.y = 0.39 + bob
+      }
+
+      renderer.render(scene, camera)
+    }
+
+    init()
+  </script>
+</body>
+</html>

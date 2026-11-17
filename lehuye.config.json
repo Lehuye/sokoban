@@ -1,0 +1,9 @@
+{
+  "uuid": "sokoban-3d-0001",
+  "name": "推箱子 3D",
+  "desc": "经典推箱子，Three.js 3D 场景。依赖宿主已安装的 three，无需插件自行安装",
+  "type": "游戏",
+  "chargeType": "free",
+  "image": "./assets/screen.webp",
+  "deps": ["three"]
+}
