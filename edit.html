@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>推箱子 · 地图编辑器</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    font-family: "Cascadia Mono", "Consolas", "Courier New", monospace;
+    background: #0b0d0f;
+    color: #e6f1ff;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ===== 顶栏 ===== */
+  .bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    background: #101519;
+  }
+  .brand { font-size: 15px; font-weight: 700; letter-spacing: 2px; }
+  .brand em { font-style: normal; color: #00eaff; }
+  .ctrl { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .ctrl label { font-size: 12px; color: rgba(230, 241, 255, 0.55); display: flex; align-items: center; gap: 6px; }
+  .ctrl input[type="number"] {
+    width: 56px; padding: 6px 8px; border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: rgba(0, 0, 0, 0.25); color: #e6f1ff; font-family: inherit; font-size: 13px;
+  }
+  .sep { width: 1px; height: 20px; background: rgba(255, 255, 255, 0.1); }
+  button {
+    background: rgba(0, 234, 255, 0.08);
+    border: 1px solid rgba(0, 234, 255, 0.25);
+    color: rgba(230, 241, 255, 0.85);
+    font-family: inherit; font-size: 12px; letter-spacing: 1px;
+    padding: 7px 12px; border-radius: 6px; cursor: pointer;
+  }
+  button:hover { background: rgba(0, 234, 255, 0.18); }
+  button:active { transform: translateY(1px); }
+  button.primary { background: #00eaff; color: #0b0d0f; font-weight: 700; border-color: #00eaff; }
+  button.ghost { background: transparent; border-color: rgba(255, 255, 255, 0.2); }
+  #zoomLabel { font-size: 12px; color: rgba(230, 241, 255, 0.6); min-width: 44px; text-align: center; }
+
+  /* ===== 主区：左画布 右色板 ===== */
+  .main { flex: 1; display: flex; min-height: 0; }
+  .board-wrap {
+    flex: 1; overflow: auto; padding: 24px;
+    background:
+      radial-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px) 0 0 / 22px 22px;
+  }
+  #board { display: block; border-radius: 8px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45); }
+
+  .palette {
+    width: 200px; flex-shrink: 0; padding: 16px;
+    border-left: 1px solid rgba(255, 255, 255, 0.06);
+    background: #101519; overflow-y: auto;
+  }
+  .palette h3 { font-size: 12px; font-weight: 500; letter-spacing: 1px; color: rgba(230, 241, 255, 0.55); margin-bottom: 12px; }
+  .swatch {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px; margin-bottom: 8px; border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(0, 0, 0, 0.18); cursor: grab;
+    font-size: 13px;
+  }
+  .swatch.active { border-color: #00eaff; background: rgba(0, 234, 255, 0.12); }
+  .swatch .chip { width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0; border: 1px solid rgba(0, 0, 0, 0.3); }
+  .swatch .sym { margin-left: auto; color: rgba(230, 241, 255, 0.4); font-size: 12px; }
+  .palette .hint { margin-top: 14px; font-size: 11px; line-height: 1.8; color: rgba(230, 241, 255, 0.35); }
+
+  /* ===== 输出弹层 ===== */
+  .overlay {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(5, 8, 10, 0.72); z-index: 50; padding: 20px;
+  }
+  .overlay.hidden { display: none; }
+  .modal {
+    width: 520px; max-width: 100%; background: #101519;
+    border: 1px solid rgba(0, 234, 255, 0.28); border-radius: 12px; padding: 22px;
+  }
+  .modal h3 { font-size: 16px; letter-spacing: 2px; margin-bottom: 12px; }
+  .err {
+    border: 1px solid rgba(226, 87, 76, 0.5); background: rgba(226, 87, 76, 0.1);
+    color: #ff8a80; border-radius: 8px; padding: 10px 12px; font-size: 12px; line-height: 1.8; margin-bottom: 12px;
+  }
+  .err.hidden { display: none; }
+  #outJson {
+    width: 100%; height: 220px; resize: vertical;
+    background: rgba(0, 0, 0, 0.3); color: #e6f1ff;
+    border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px;
+    padding: 12px; font-family: inherit; font-size: 12px; line-height: 1.6;
+  }
+  .modal .row { display: flex; gap: 10px; margin-top: 14px; justify-content: flex-end; }
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand">推箱子 <em>地图编辑器</em></div>
+  <div class="ctrl">
+    <label>宽 <input id="inW" type="number" min="1" max="40" value="8" /></label>
+    <label>高 <input id="inH" type="number" min="1" max="40" value="6" /></label>
+    <button id="btnNew">新建画布</button>
+    <button id="btnClear" class="ghost">清空</button>
+    <span class="sep"></span>
+    <button id="zoomOut">−</button>
+    <span id="zoomLabel">40px</span>
+    <button id="zoomIn">＋</button>
+    <span class="sep"></span>
+    <button id="btnExport" class="primary">输出 JSON</button>
+  </div>
+</header>
+
+<main class="main">
+  <section class="board-wrap">
+    <canvas id="board"></canvas>
+  </section>
+  <aside class="palette">
+    <h3>色块（拖入画布 / 点选后绘制）</h3>
+    <div id="palette"></div>
+    <p class="hint">右键 = 擦除（地面）<br>Ctrl + 滚轮 = 缩放<br>终点上放盒子 / 玩家会自动合并为 * 与 +</p>
+  </aside>
+</main>
+
+<div id="outOverlay" class="overlay hidden">
+  <div class="modal">
+    <h3>关卡 JSON</h3>
+    <div id="errBox" class="err hidden"></div>
+    <textarea id="outJson" readonly></textarea>
+    <div class="row">
+      <button id="btnCopy">复制</button>
+      <button id="btnRegen" class="ghost">换 uuid</button>
+      <button id="btnClose" class="ghost">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id)
+  const BASE = 10 // 1 个单位色块 = 10px（zoom = 1 时）
+
+  /* 五个色块：符号 -> 名称 / 颜色 */
+  const TILES = [
+    { sym: '#', name: '墙体', color: '#8a5a33' },
+    { sym: ' ', name: '地面', color: '#e8ddc4' },
+    { sym: '.', name: '终点', color: '#2ec4b6' },
+    { sym: '$', name: '盒子', color: '#e8a33d' },
+    { sym: '@', name: '玩家', color: '#e2574c' },
+  ]
+  const COLOR = Object.fromEntries(TILES.map(t => [t.sym, t.color]))
+
+  let W = 8, H = 6
+  let grid = []            // grid[y][x] ∈ #  .  $  @  *  +  空格
+  let zoom = 4
+  let tool = '@'
+  let hover = null
+  let painting = false
+  let currentUuid = genUuid()
+
+  /* ---------- 工具 ---------- */
+  function clampInt (v, min, max, fallback) {
+    const n = parseInt(v, 10)
+    if (!Number.isFinite(n)) return fallback
+    return Math.max(min, Math.min(max, n))
+  }
+
+  function genUuid () {
+    if (crypto.randomUUID) return crypto.randomUUID()
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const r = Math.random() * 16 | 0
+      const v = c === 'x' ? r : (r & 3 | 8)
+      return v.toString(16)
+    })
+  }
+
+  /* ---------- 画布 ---------- */
+  function newBoard () {
+    W = clampInt($('inW').value, 1, 40, 8)
+    H = clampInt($('inH').value, 1, 40, 6)
+    grid = Array.from({ length: H }, () => Array(W).fill(' '))
+    hover = null
+    render()
+  }
+
+  function cellFromEvent (e) {
+    const cv = $('board')
+    const rect = cv.getBoundingClientRect()
+    const tile = BASE * zoom
+    const x = Math.floor((e.clientX - rect.left) / tile)
+    const y = Math.floor((e.clientY - rect.top) / tile)
+    if (x < 0 || y < 0 || x >= W || y >= H) return null
+    return { x, y }
+  }
+
+  /* 终点上叠放盒子/玩家 -> * / +；反向同理 */
+  function combine (old, next) {
+    if (next === '.') return (old === '$' || old === '*') ? '*' : (old === '@' || old === '+') ? '+' : '.'
+    if (next === '$') return (old === '.' || old === '*' || old === '+') ? '*' : '$'
+    if (next === '@') return (old === '.' || old === '*' || old === '+') ? '+' : '@'
+    return next
+  }
+
+  function paintAt (x, y, sym) {
+    const old = grid[y][x]
+    grid[y][x] = (sym === ' ' || sym === '#') ? sym : combine(old, sym)
+    render()
+  }
+
+  function render () {
+    const cv = $('board')
+    const ctx = cv.getContext('2d')
+    const tile = BASE * zoom
+    cv.width = W * tile
+    cv.height = H * tile
+
+    ctx.fillStyle = '#0b0d0f'
+    ctx.fillRect(0, 0, cv.width, cv.height)
+
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        drawCell(ctx, x, y, grid[y][x], tile)
+      }
+    }
+
+    // 网格线
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.18)'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    for (let x = 0; x <= W; x++) { ctx.moveTo(x * tile + 0.5, 0); ctx.lineTo(x * tile + 0.5, H * tile) }
+    for (let y = 0; y <= H; y++) { ctx.moveTo(0, y * tile + 0.5); ctx.lineTo(W * tile, y * tile + 0.5) }
+    ctx.stroke()
+
+    // 悬停高亮（磁吸到最近单位格）
+    if (hover) {
+      ctx.strokeStyle = '#00eaff'
+      ctx.lineWidth = 2
+      ctx.strokeRect(hover.x * tile + 1, hover.y * tile + 1, tile - 2, tile - 2)
+    }
+  }
+
+  function drawCell (ctx, x, y, sym, tile) {
+    const px = x * tile, py = y * tile
+    const base = sym === '*' || sym === '+' ? COLOR['.']
+               : sym === '#' ? COLOR['#']
+               : COLOR[' ']
+    ctx.fillStyle = base
+    ctx.fillRect(px, py, tile, tile)
+
+    const cx = px + tile / 2, cy = py + tile / 2
+
+    if (sym === '.' || sym === '+' || sym === '*') {
+      // 终点：圆环 + 中心点
+      ctx.strokeStyle = COLOR['.']
+      ctx.lineWidth = Math.max(2, tile * 0.07)
+      ctx.beginPath(); ctx.arc(cx, cy, tile * 0.26, 0, Math.PI * 2); ctx.stroke()
+      ctx.fillStyle = COLOR['.']
+      ctx.beginPath(); ctx.arc(cx, cy, tile * 0.08, 0, Math.PI * 2); ctx.fill()
+    }
+    if (sym === '$' || sym === '*') {
+      // 盒子：橙色方块
+      const pad = tile * 0.18
+      ctx.fillStyle = COLOR['$']
+      ctx.fillRect(px + pad, py + pad, tile - pad * 2, tile - pad * 2)
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)'
+      ctx.lineWidth = Math.max(1, tile * 0.05)
+      ctx.strokeRect(px + pad, py + pad, tile - pad * 2, tile - pad * 2)
+    }
+    if (sym === '@' || sym === '+') {
+      // 玩家：红色圆
+      ctx.fillStyle = COLOR['@']
+      ctx.beginPath(); ctx.arc(cx, cy, tile * 0.22, 0, Math.PI * 2); ctx.fill()
+    }
+  }
+
+  /* ---------- 缩放 ---------- */
+  function setZoom (z) {
+    zoom = Math.max(1, Math.min(10, z))
+    $('zoomLabel').textContent = BASE * zoom + 'px'
+    render()
+  }
+
+  /* ---------- 色板 ---------- */
+  function buildPalette () {
+    const pal = $('palette')
+    TILES.forEach(t => {
+      const el = document.createElement('div')
+      el.className = 'swatch'
+      el.draggable = true
+      el.dataset.sym = t.sym
+      const label = t.sym === ' ' ? '␣' : t.sym
+      el.innerHTML =
+        `<span class="chip" style="background:${t.color}"></span>` +
+        `<span>${t.name}</span><span class="sym">${label}</span>`
+      el.addEventListener('click', () => selectTool(t.sym, el))
+      el.addEventListener('dragstart', e => {
+        e.dataTransfer.setData('text/sym', t.sym)
+        selectTool(t.sym, el)
+      })
+      pal.appendChild(el)
+    })
+  }
+
+  function selectTool (sym, el) {
+    tool = sym
+    document.querySelectorAll('.swatch').forEach(x => x.classList.toggle('active', x === el))
+  }
+
+  /* ---------- 画布事件 ---------- */
+  const cv = $('board')
+
+  cv.addEventListener('mousedown', e => {
+    const cell = cellFromEvent(e)
+    if (!cell) return
+    e.preventDefault()
+    painting = true
+    const sym = e.button === 2 ? ' ' : tool
+    paintAt(cell.x, cell.y, sym)
+  })
+  cv.addEventListener('mousemove', e => {
+    const cell = cellFromEvent(e)
+    hover = cell
+    if (painting && cell) paintAt(cell.x, cell.y, e.buttons === 2 ? ' ' : tool)
+    else render()
+  })
+  window.addEventListener('mouseup', () => { painting = false })
+  cv.addEventListener('mouseleave', () => { hover = null; render() })
+  cv.addEventListener('contextmenu', e => e.preventDefault())
+
+  cv.addEventListener('dragover', e => e.preventDefault())
+  cv.addEventListener('drop', e => {
+    e.preventDefault()
+    const sym = e.dataTransfer.getData('text/sym')
+    const cell = cellFromEvent(e)
+    if (sym && cell) paintAt(cell.x, cell.y, sym)
+  })
+
+  // Ctrl + 滚轮缩放
+  document.querySelector('.board-wrap').addEventListener('wheel', e => {
+    if (!e.ctrlKey) return
+    e.preventDefault()
+    setZoom(zoom + (e.deltaY < 0 ? 1 : -1))
+  }, { passive: false })
+
+  /* ---------- 校验 ---------- */
+  function validate () {
+    let player = 0, box = 0, goal = 0
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const ch = grid[y][x]
+        if (ch === '@' || ch === '+') player++
+        if (ch === '$' || ch === '*') box++
+        if (ch === '.' || ch === '*' || ch === '+') goal++
+      }
+    }
+    const errs = []
+    if (player !== 1) errs.push(`玩家(@)数量为 ${player}，必须且只能有 1 个`)
+    if (box === 0) errs.push('至少放置 1 个盒子($)')
+    if (goal === 0) errs.push('至少放置 1 个终点(.)')
+    if (box !== goal) errs.push(`盒子 ${box} 个、终点 ${goal} 个，数量必须一致`)
+    return errs
+  }
+
+  /* ---------- 输出 ---------- */
+  function exportJson () {
+    const errs = validate()
+    const errBox = $('errBox'), ta = $('outJson')
+    if (errs.length) {
+      errBox.classList.remove('hidden')
+      errBox.innerHTML = errs.map(e => '· ' + e).join('<br>')
+      ta.value = ''
+      $('outOverlay').classList.remove('hidden')
+      return
+    }
+    errBox.classList.add('hidden')
+    const payload = { uuid: currentUuid, rows: grid.map(r => r.join('')) }
+    ta.value = JSON.stringify(payload, null, 2)
+    $('outOverlay').classList.remove('hidden')
+  }
+
+  function refreshOutput () {
+    if ($('outOverlay').classList.contains('hidden')) return
+    const payload = { uuid: currentUuid, rows: grid.map(r => r.join('')) }
+    $('outJson').value = JSON.stringify(payload, null, 2)
+  }
+
+  /* ---------- 按钮 ---------- */
+  $('btnNew').addEventListener('click', newBoard)
+  $('btnClear').addEventListener('click', () => {
+    grid = Array.from({ length: H }, () => Array(W).fill(' '))
+    render()
+  })
+  $('zoomIn').addEventListener('click', () => setZoom(zoom + 1))
+  $('zoomOut').addEventListener('click', () => setZoom(zoom - 1))
+  $('btnExport').addEventListener('click', exportJson)
+  $('btnClose').addEventListener('click', () => $('outOverlay').classList.add('hidden'))
+  $('btnRegen').addEventListener('click', () => { currentUuid = genUuid(); refreshOutput() })
+  $('btnCopy').addEventListener('click', async () => {
+    const ta = $('outJson')
+    ta.select()
+    try { await navigator.clipboard.writeText(ta.value) }
+    catch { document.execCommand('copy') }
+  })
+
+  /* ---------- 启动 ---------- */
+  buildPalette()
+  newBoard()
+  selectTool('@', document.querySelector('.swatch[data-sym="@"]'))
+</script>
+</body>
+</html>
